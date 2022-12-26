@@ -1,4 +1,5 @@
 use crate::utils::*;
+use std::marker;
 use std::any;
 use std::cmp;
 use std::collections;
@@ -588,7 +589,7 @@ impl Schedule {
 }
 
 pub struct Stage {
-
+    systems: Vec<BoxedSystem>,
 }
 
 impl Stage {
@@ -600,58 +601,150 @@ impl Stage {
         todo!()
     }
 
-    pub fn add_system<In, Out>(self, system: impl IntoSystem<In, Out>) -> Self {
-        todo!()
+    pub fn add_system<In, Out, Params>(mut self, system: impl IntoSystem<In, Out, Params>) -> Self 
+        where In: SystemParameter,
+              Out: SystemParameter
+    {
+        let system: Box<dyn System<In = (), Out = ()>> = box IntoSystem::into_system(system);
+
+        self.systems.push(system);
+        
+        self
     }
 }
 
-pub trait System: Send + Sync + 'static {
+pub type BoxedSystem<In = (), Out = ()> = Box<dyn System<In = In, Out = Out>>;
+
+pub trait System: 'static + Send + Sync {
     type In;
     type Out;
+
+    fn call(&mut self, input: Self::In) -> Self::Out;
 }
 
-pub trait IntoSystem<In, Out> {
-    pub type System: System<In = In, Out = Out>;
+pub struct SystemDescriptor {
+    
+}
+
+pub trait IntoSystem<In, Out, Params>: 'static + Copy {
+    type System: System<In = In, Out = Out>;
 
     fn into_system(this: Self) -> Self::System;
 }
 
-impl<A, B, C> IntoSystem<(B,), C> for A 
-    where A: Fn(B) -> C,
-    where B: SystemParameter
+pub struct AlreadyWasSystem;
+
+impl<A, B, C> IntoSystem<B, C, AlreadyWasSystem> for A
+    where A: System<In = B, Out = C> + Copy 
 {
-    type System = FunctionSystem<(B,), C>;
+    type System = A;
 
     fn into_system(this: Self) -> Self::System {
-        todo!()
+        this
     }
 }
 
-pub struct FunctionSystem<In, Out> {
-    marker: std::marker::PhantomData<(In, Out)>,
+pub struct FunctionSystem<Function, In, Out> {
+    function: Function,
+    marker: marker::PhantomData<(In, Out)>,
 }
 
-impl<In, Out> System for FunctionSystem<In, Out>
-    where In: 'static + Send + Sync,
-    where Out: 'static + Send + Sync,
+pub struct IsFunctionSystem;
+
+impl<A, B, C> IntoSystem<(B,), C, IsFunctionSystem> for A 
+    where A: 'static + Fn(B) -> C + Send + Sync + Copy,
+          B: 'static + SystemParameter,
+          C: 'static + SystemParameter
 {
-    type In = In;
-    type Out = Out;
+    type System = FunctionSystem<A, (B,), C>;
+
+    fn into_system(function: Self) -> Self::System {
+        FunctionSystem {
+            function, 
+            marker: marker::PhantomData,
+        }
+    }
 }
 
-pub trait SystemParameter {
-    
+impl<A, B, C> System for FunctionSystem<A, (B,), C>
+    where A: 'static + Fn(B) -> C + Send + Sync,
+          B: 'static + Send + Sync,
+          C: 'static + Send + Sync
+{
+    type In = (B,);
+    type Out = C;
+
+    fn call(&mut self, input: Self::In) -> Self::Out {
+        (self.function)(input.0)     
+    }
+}
+
+pub struct WrapperSystem {
+    function: Box<dyn FnMut()>,
+}
+
+pub struct IsWrappedSystem<A, B, C> {
+    marker: marker::PhantomData<(A, B, C)>,
+}
+
+impl<A, B, C, D> IntoSystem<(), (), IsWrappedSystem<B, C, D>> for A
+    where A: IntoSystem<B, C, D>
+{
+    type System = WrapperSystem;
+
+    fn into_system(this: Self) -> Self::System {
+        WrapperSystem {
+            function: box move || {
+                let mut system = IntoSystem::into_system(this);
+                system.call(todo!());
+            }
+        }
+    }
+}
+
+impl System for WrapperSystem
+{
+    type In = ();
+    type Out = ();
+
+    fn call(&mut self, input: Self::In) -> Self::Out {
+        (self.function)()
+    }
+}
+
+unsafe impl Send for WrapperSystem {}
+
+unsafe impl Sync for WrapperSystem {}
+
+pub trait SystemParameter: Send + Sync {
 }
 
 impl<Q: QueryParameter> SystemParameter for Query<Q> {
 
 }
 
-pub struct Query<Q: QueryParameter> {
-    marker: std::marker::PhantomData<Q>, 
+impl SystemParameter for () {
+    
 }
 
-pub trait QueryParameter {
+impl<A> SystemParameter for (A,) 
+    where A: SystemParameter
+{
+
+}
+
+impl<A, B> SystemParameter for (A, B) 
+    where A: SystemParameter,
+          B: SystemParameter,
+{
+
+}
+
+pub struct Query<Q: QueryParameter> {
+    marker: marker::PhantomData<Q>, 
+}
+
+pub trait QueryParameter: Send + Sync {
     
 }
 
@@ -659,21 +752,25 @@ impl QueryParameter for Entity {
 
 }
 
-impl<'a, T: Component> QueryParameter for &'a T {
+impl<'a, T> QueryParameter for &'a T 
+    where T: 'static + Send + Sync
+{
     
 }
 
-impl<'a, T: Component> QueryParameter for &'a mut T {
+impl<'a, T> QueryParameter for &'a mut T
+    where T: 'static + Send + Sync
+{
 
 }
 
-impl<'a, A> QueryParameter for (A,) 
+impl<A> QueryParameter for (A,) 
     where A: QueryParameter
 {
 
 }
 
-impl<'a, A, B> QueryParameter for (A, B) 
+impl<A, B> QueryParameter for (A, B) 
     where A: QueryParameter,
           B: QueryParameter,
 {

@@ -57,7 +57,7 @@ pub async fn start() -> Runtime {
 
     world.despawn(e);
 
-    let schedule = Schedule::new();
+    let mut schedule = Schedule::new();
 
     fn my_system(query: Query<(Entity, &String)>) {
 

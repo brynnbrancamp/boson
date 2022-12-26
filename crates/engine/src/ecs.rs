@@ -601,12 +601,10 @@ impl Stage {
         todo!()
     }
 
-    pub fn add_system<In, Out, Params>(mut self, system: impl IntoSystem<In, Out, Params>) -> Self 
-        where In: SystemParameter,
-              Out: SystemParameter
+    pub fn add_system<Params>(mut self, system: impl IntoSystem<(), (), Params>) -> Self 
     {
-        let system: Box<dyn System<In = (), Out = ()>> = box IntoSystem::into_system(system);
-
+        let system = box IntoSystem::into_system(system);
+        
         self.systems.push(system);
         
         self
@@ -620,13 +618,15 @@ pub trait System: 'static + Send + Sync {
     type Out;
 
     fn call(&mut self, input: Self::In) -> Self::Out;
+    fn fetch_input(&mut self, world: &mut World, resources: &mut Resources);
+    fn take_output(&mut self) -> Self::Out;
 }
 
 pub struct SystemDescriptor {
     
 }
 
-pub trait IntoSystem<In, Out, Params>: 'static + Copy {
+pub trait IntoSystem<In, Out, Params>: 'static {
     type System: System<In = In, Out = Out>;
 
     fn into_system(this: Self) -> Self::System;
@@ -635,7 +635,7 @@ pub trait IntoSystem<In, Out, Params>: 'static + Copy {
 pub struct AlreadyWasSystem;
 
 impl<A, B, C> IntoSystem<B, C, AlreadyWasSystem> for A
-    where A: System<In = B, Out = C> + Copy 
+    where A: System<In = B, Out = C>
 {
     type System = A;
 
@@ -646,13 +646,17 @@ impl<A, B, C> IntoSystem<B, C, AlreadyWasSystem> for A
 
 pub struct FunctionSystem<Function, In, Out> {
     function: Function,
+    input: Option<In>,
+    output: Option<Out>,
     marker: marker::PhantomData<(In, Out)>,
 }
 
-pub struct IsFunctionSystem;
+pub struct IsFunctionSystem<In, Out> {
+    marker: marker::PhantomData<(In, Out)>,
+}
 
-impl<A, B, C> IntoSystem<(B,), C, IsFunctionSystem> for A 
-    where A: 'static + Fn(B) -> C + Send + Sync + Copy,
+impl<A, B, C> IntoSystem<(), (), IsFunctionSystem<B, C>> for A 
+    where A: 'static + Fn(B) -> C + Send + Sync,
           B: 'static + SystemParameter,
           C: 'static + SystemParameter
 {
@@ -661,6 +665,8 @@ impl<A, B, C> IntoSystem<(B,), C, IsFunctionSystem> for A
     fn into_system(function: Self) -> Self::System {
         FunctionSystem {
             function, 
+            input: None,
+            output: None,
             marker: marker::PhantomData,
         }
     }
@@ -671,50 +677,13 @@ impl<A, B, C> System for FunctionSystem<A, (B,), C>
           B: 'static + Send + Sync,
           C: 'static + Send + Sync
 {
-    type In = (B,);
-    type Out = C;
-
-    fn call(&mut self, input: Self::In) -> Self::Out {
-        (self.function)(input.0)     
-    }
-}
-
-pub struct WrapperSystem {
-    function: Box<dyn FnMut()>,
-}
-
-pub struct IsWrappedSystem<A, B, C> {
-    marker: marker::PhantomData<(A, B, C)>,
-}
-
-impl<A, B, C, D> IntoSystem<(), (), IsWrappedSystem<B, C, D>> for A
-    where A: IntoSystem<B, C, D>
-{
-    type System = WrapperSystem;
-
-    fn into_system(this: Self) -> Self::System {
-        WrapperSystem {
-            function: box move || {
-                let mut system = IntoSystem::into_system(this);
-                system.call(todo!());
-            }
-        }
-    }
-}
-
-impl System for WrapperSystem
-{
     type In = ();
     type Out = ();
 
-    fn call(&mut self, input: Self::In) -> Self::Out {
-        (self.function)()
+    fn call(&mut self, _: Self::In) -> Self::Out {
+        self.output = self.input.take().map(|input| (self.function)(input.0));  
     }
 }
-
-unsafe impl Send for WrapperSystem {}
-
-unsafe impl Sync for WrapperSystem {}
 
 pub trait SystemParameter: Send + Sync {
 }
